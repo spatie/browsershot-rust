@@ -3,11 +3,11 @@ title: Installation & setup
 weight: 4
 ---
 
-The crate is not published on crates.io. Add it as a Git dependency:
+Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-spatie-browsershot = { git = "https://github.com/spatie/browsershot-rust", branch = "main" }
+spatie-browsershot = "1"
 ```
 
 This package requires Chrome or Chromium to be installed. You can find installation instructions on [the requirements page](/docs/browsershot-rust/v1/requirements).

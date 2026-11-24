@@ -17,11 +17,11 @@ We highly appreciate you sending us a postcard from your hometown, mentioning wh
 
 Requires Rust 1.89 or newer and an installed Chrome or Chromium browser. See the [requirements](https://spatie.be/docs/browsershot-rust/v1/requirements) for installation and custom executable paths.
 
-The crate is not published on crates.io. Use a Git dependency:
+Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-spatie-browsershot = { git = "https://github.com/spatie/browsershot-rust", branch = "main" }
+spatie-browsershot = "1"
 ```
 
 ## Usage
