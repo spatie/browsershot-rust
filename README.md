@@ -1,4 +1,4 @@
-# spatie-browsershot
+# Convert HTML to an image, PDF or string
 
 [![Tests](https://img.shields.io/github/actions/workflow/status/spatie/browsershot-rust/ci.yml?branch=main&style=flat-square)](https://github.com/spatie/browsershot-rust/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](https://github.com/spatie/browsershot-rust/blob/main/LICENSE.md)
