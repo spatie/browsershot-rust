@@ -656,7 +656,7 @@ fn distinguishes_strict_network_idle_from_two_connection_idle() {
     ));
     for pipe in [false, true] {
         assert_eq!(
-            html("<script>setInterval(()=>fetch('/inspect'),40)</script>")
+            html("<script>setInterval(()=>fetch('/inspect').then(r=>r.text()),40)</script>")
                 .set_content_url(&server.url)
                 .set_option("pipe", pipe)
                 .wait_until_network_idle(true)
