@@ -12,7 +12,7 @@ You can emulate the media type, especially useful when you're generating pdf sho
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 # let path_to_pdf = "example.pdf";
 Browsershot::url("https://example.com")
-    .emulate_media(Some("screen")) // "screen", "print" (default) or null (passing null disables the emulation).
+    .emulate_media(Some("screen")) // Some("screen"), Some("print") (default) or None (disables the emulation).
     .save_pdf(path_to_pdf)?;
 # Ok(())
 # }

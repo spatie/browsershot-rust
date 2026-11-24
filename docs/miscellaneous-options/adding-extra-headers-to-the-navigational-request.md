@@ -3,7 +3,7 @@ title: Adding extra headers to the navigational request
 weight: 2
 ---
 
-To add custom HTTP headers to a navigational HTTP request, use `extraNavigationHTTPHeaders` like so:
+To add custom HTTP headers to a navigational HTTP request, use `set_extra_navigation_http_headers` like so:
 
 ```rust,no_run
 # use spatie_browsershot::{Browsershot, ClickOptions, Polling};
