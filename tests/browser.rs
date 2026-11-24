@@ -654,16 +654,20 @@ fn distinguishes_strict_network_idle_from_two_connection_idle() {
             .evaluate("42"),
         Err(Error::Timeout)
     ));
-    assert_eq!(
-        html(content)
-            .set_content_url(&server.url)
-            .wait_until_network_idle(true)
-            .set_option("networkIdleTimeout", 30)
-            .timeout(5)
-            .evaluate("42")
-            .unwrap(),
-        42
-    );
+    for pipe in [false, true] {
+        assert_eq!(
+            html("<script>setInterval(()=>fetch('/inspect'),40)</script>")
+                .set_content_url(&server.url)
+                .set_option("pipe", pipe)
+                .wait_until_network_idle(true)
+                .set_option("networkIdleTimeout", 10)
+                .timeout(5)
+                .evaluate("42")
+                .unwrap_or_else(|error| panic!("pipe={pipe}: {error}")),
+            42,
+            "pipe={pipe}"
+        );
+    }
 }
 
 #[test]

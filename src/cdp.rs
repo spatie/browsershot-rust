@@ -211,7 +211,7 @@ impl Connection {
                 use std::os::{fd::OwnedFd, unix::net::UnixStream};
                 let (writer, child_read) = UnixStream::pair()?;
                 let (reader, child_write) = UnixStream::pair()?;
-                reader.set_read_timeout(Some(Duration::from_millis(50)))?;
+                reader.set_nonblocking(true)?;
                 writer.set_write_timeout(Some(Duration::from_secs(1)))?;
                 command.arg("--remote-debugging-pipe");
                 command
@@ -313,22 +313,17 @@ impl Connection {
                 .ok_or(Error::Timeout)?;
             match TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(5))) {
                 Ok(stream) => {
+                    stream.set_nodelay(true)?;
                     stream.set_read_timeout(Some(remaining))?;
                     stream.set_write_timeout(Some(remaining))?;
                     let (mut socket, _) = tungstenite::client_tls(endpoint, stream)
                         .map_err(|error| Error::RemoteConnection(error.to_string()))?;
                     match socket.get_mut() {
                         MaybeTlsStream::Plain(stream) => {
-                            stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-                            stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                            stream.set_nonblocking(true)?;
                         }
                         MaybeTlsStream::Rustls(stream) => {
-                            stream
-                                .sock
-                                .set_read_timeout(Some(Duration::from_millis(50)))?;
-                            stream
-                                .sock
-                                .set_write_timeout(Some(Duration::from_secs(1)))?;
+                            stream.sock.set_nonblocking(true)?;
                         }
                         _ => return Err(Error::Protocol("unsupported TLS transport".into())),
                     }
@@ -359,7 +354,20 @@ impl Connection {
         let text = message.to_string();
         match &mut self.transport {
             Transport::Starting => return Err(Error::Protocol("Chrome is still starting".into())),
-            Transport::WebSocket(socket) => socket.send(Message::Text(text.into()))?,
+            Transport::WebSocket(socket) => {
+                let deadline = (Instant::now() + self.protocol_timeout).min(self.deadline);
+                let mut pending = socket.send(Message::Text(text.into()));
+                // Tungstenite retains partially written frames; flushing must not resend them.
+                while matches!(&pending, Err(tungstenite::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+                {
+                    if Instant::now() >= deadline {
+                        return Err(Error::Timeout);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                    pending = socket.flush();
+                }
+                pending?;
+            }
             #[cfg(windows)]
             Transport::WindowsPipe(pipe) => pipe.send(&text)?,
             #[cfg(unix)]
@@ -373,7 +381,7 @@ impl Connection {
 
     fn receive(&mut self) -> Result<Option<Value>, Error> {
         self.check_deadline()?;
-        match &mut self.transport {
+        let message = match &mut self.transport {
             Transport::Starting => Err(Error::Protocol("Chrome is still starting".into())),
             #[cfg(windows)]
             Transport::WindowsPipe(pipe) => pipe
@@ -421,7 +429,11 @@ impl Connection {
                     Err(error) => Err(error.into()),
                 }
             }
+        }?;
+        if message.is_none() {
+            std::thread::sleep(Duration::from_millis(1));
         }
+        Ok(message)
     }
 
     fn call_browser(&mut self, method: &str, params: Value) -> Result<Value, Error> {

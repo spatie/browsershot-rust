@@ -4,7 +4,7 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     os::windows::io::{AsHandle, AsRawHandle},
     process::{Child, Command},
-    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     time::Duration,
 };
 
@@ -82,10 +82,10 @@ impl Pipe {
     }
 
     pub(crate) fn receive(&self) -> io::Result<Option<Vec<u8>>> {
-        match self.messages.recv_timeout(Duration::from_millis(50)) {
+        match self.messages.try_recv() {
             Ok(message) => message.map(Some),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Err(io::ErrorKind::BrokenPipe.into()),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(io::ErrorKind::BrokenPipe.into()),
         }
     }
 }
