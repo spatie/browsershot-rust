@@ -1,0 +1,5 @@
+Device profiles in devices.json are derived from Puppeteer's Device.ts.
+Copyright 2017 Google Inc.
+Source: https://github.com/puppeteer/puppeteer/blob/main/packages/puppeteer-core/src/common/Device.ts
+Licensed under the Apache License, Version 2.0. See devices-LICENSE.
+The TypeScript device table has been converted to JSON; no Puppeteer code runs at runtime.

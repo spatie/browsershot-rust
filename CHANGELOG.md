@@ -1,7 +1,7 @@
 # Changelog
 
-All notable changes to `{{crate_name}}` will be documented in this file.
+All notable changes to `spatie-browsershot` will be documented in this file.
 
 ## Unreleased
 
-- Initial development.
+- Initial Rust implementation using the Chrome DevTools Protocol, with screenshots, PDFs, HTML evaluation, page interactions and network diagnostics.

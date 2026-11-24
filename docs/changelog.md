@@ -3,4 +3,4 @@ title: Changelog
 weight: 6
 ---
 
-See the [changelog on GitHub](https://github.com/{{owner}}/{{repository}}/blob/main/CHANGELOG.md).
+All notable changes to browsershot are documented [on GitHub](https://github.com/spatie/browsershot-rust/blob/main/CHANGELOG.md)

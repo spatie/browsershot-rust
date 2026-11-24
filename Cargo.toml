@@ -1,19 +1,38 @@
 [package]
-name = {{crate_name_quoted}}
+name = "spatie-browsershot"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-authors = [{{author_quoted}}]
-description = {{description_quoted}}
+authors = ["Freek Van der Herten <freek@spatie.be>"]
+description = "Convert HTML to an image, PDF or string"
 license = "MIT"
-repository = "https://github.com/{{owner}}/{{repository}}"
-documentation = "https://docs.rs/{{crate_name}}"
+repository = "https://github.com/spatie/browsershot-rust"
+documentation = "https://spatie.be/docs/browsershot-rust/v1/introduction"
+homepage = "https://spatie.be/docs/browsershot-rust"
 readme = "README.md"
-keywords = ["spatie"]
-categories = ["development-tools"]
+keywords = ["spatie", "chrome", "pdf", "screenshot", "devtools"]
+categories = ["web-programming", "multimedia::images"]
 include = ["/src/", "/tests/*.rs", "/build.rs", "/docs/", "/README.md", "/LICENSE.md", "/CHANGELOG.md", "/CONTRIBUTING.md", "/SECURITY.md", "/Cargo.lock"]
 
 [dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+ureq = { version = "3", features = ["json"] }
+url = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[target.'cfg(unix)'.dependencies]
+command-fds = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+interprocess = "2.4"
+
+[dev-dependencies]
+tiny_http = "0.12"
 
 [lints.rust]
 unsafe_code = "forbid"
