@@ -67,6 +67,10 @@ impl From<tungstenite::Error> for Error {
 /// The result of a browser operation, including requests and page diagnostics.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChromiumResult {
+    /// The last evaluation value, HTML string, or base64-encoded binary output.
+    pub result: Value,
+    /// The error from the last operation, if it failed.
+    pub exception: Option<String>,
     /// All requested URLs, in request order.
     pub requests: Vec<Value>,
     /// Console messages with their type, text, location and stack trace.
@@ -96,8 +100,6 @@ enum Source {
 pub struct Browsershot {
     source: Source,
     options: Value,
-    arguments: Vec<String>,
-    environment: BTreeMap<String, String>,
     temp_path: Option<std::path::PathBuf>,
     result: Option<ChromiumResult>,
     manipulations: Vec<Arc<dyn Fn(image::DynamicImage) -> image::DynamicImage + Send + Sync>>,
@@ -109,7 +111,6 @@ impl std::fmt::Debug for Browsershot {
             .debug_struct("Browsershot")
             .field("source", &self.source)
             .field("options", &self.options)
-            .field("arguments", &self.arguments)
             .field("temp_path", &self.temp_path)
             .field("result", &self.result)
             .field("manipulations", &self.manipulations.len())
@@ -121,9 +122,7 @@ impl Browsershot {
     fn new(source: Source) -> Self {
         Self {
             source,
-            options: json!({"viewport":{"width":800,"height":600,"deviceScaleFactor":1,"isMobile":false},"timeout":60000,"protocolTimeout":30000}),
-            arguments: Vec::new(),
-            environment: BTreeMap::new(),
+            options: json!({"viewport":{},"timeout":60000,"protocolTimeout":30000}),
             temp_path: None,
             result: None,
             manipulations: Vec::new(),
@@ -154,6 +153,7 @@ impl Browsershot {
     /// Replace the current page with HTML.
     pub fn set_html(mut self, html: impl Into<String>) -> Self {
         self.source = Source::Html(html.into());
+        self.options["displayHeaderFooter"] = json!(false);
         self
     }
 
@@ -182,25 +182,29 @@ impl Browsershot {
         mut self,
         arguments: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Self {
-        self.arguments.extend(
-            arguments
-                .into_iter()
-                .map(|arg| format!("--{}", arg.as_ref().trim_start_matches('-'))),
-        );
+        for argument in arguments {
+            self.push_option(
+                "args",
+                json!(format!("--{}", argument.as_ref().trim_start_matches('-'))),
+            );
+        }
         self
     }
 
     /// Set environment variables for the Chrome child process.
     pub fn set_environment_options(
-        mut self,
+        self,
         environment: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
-        self.environment.extend(
-            environment
-                .into_iter()
-                .map(|(key, value)| (key.into(), value.into())),
-        );
-        self
+        self.set_option(
+            "env",
+            json!(
+                environment
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value.into()))
+                    .collect::<BTreeMap<String, String>>()
+            ),
+        )
     }
 
     /// Place temporary Chrome profiles and HTML files in this directory.
@@ -237,8 +241,8 @@ impl Browsershot {
         if extension.eq_ignore_ascii_case("pdf") {
             self.save_pdf(path)
         } else {
-            std::fs::write(path, self.screenshot()?)?;
-            Ok(())
+            let bytes = self.screenshot()?;
+            self.write_output(path, &bytes)
         }
     }
 
@@ -247,8 +251,17 @@ impl Browsershot {
     /// # Errors
     /// Returns browser, PDF option validation or file-writing errors.
     pub fn save_pdf(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
-        std::fs::write(path, self.pdf()?)?;
-        Ok(())
+        let bytes = self.pdf()?;
+        self.write_output(path.as_ref(), &bytes)
+    }
+
+    fn write_output(&mut self, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+        std::fs::write(path, bytes).map_err(|error| {
+            if let Some(output) = self.result.as_mut() {
+                output.exception = Some(error.to_string());
+            }
+            Error::Io(error)
+        })
     }
 
     /// Capture the page as PNG, JPEG or WebP bytes.
@@ -279,7 +292,13 @@ impl Browsershot {
             }
         };
         let mut output = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut output, format)?;
+        if format == image::ImageFormat::Jpeg {
+            let quality = self.options["quality"].as_u64().unwrap_or(75) as u8;
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality)
+                .encode_image(&image.to_rgb8())?;
+        } else {
+            image.write_to(&mut output, format)?;
+        }
         Ok(output.into_inner())
     }
 
@@ -331,7 +350,14 @@ impl Browsershot {
 
     fn run(&mut self, action: browser::Action<'_>) -> Result<Value, Error> {
         self.result = Some(ChromiumResult::default());
-        browser::run(self, action)
+        let result = browser::run(self, action);
+        if let Some(output) = self.result.as_mut() {
+            match &result {
+                Ok(value) => output.result = value.clone(),
+                Err(error) => output.exception = Some(error.to_string()),
+            }
+        }
+        result
     }
 
     /// Diagnostics from the most recent operation, including a failed operation.

@@ -34,12 +34,22 @@ jobs:
         id: chrome
         with:
           chrome-version: stable
+      - name: Preserve the macOS app bundle extension
+        if: runner.os == 'macOS'
+        id: mac-chrome
+        shell: bash
+        env:
+          CHROME_EXECUTABLE: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          bundle="${CHROME_EXECUTABLE%/Contents/MacOS/*}"
+          mv "$bundle" "$bundle.app"
+          echo "path=$bundle.app/Contents/MacOS/${CHROME_EXECUTABLE##*/}" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-targets --all-features
         env:
-          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          CHROME_PATH: ${{ steps.mac-chrome.outputs.path || steps.chrome.outputs.chrome-path }}
       - run: cargo test --locked --doc --all-features
       - run: cargo doc --locked --no-deps --all-features
       - run: cargo package --locked --allow-dirty

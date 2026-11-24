@@ -7,7 +7,7 @@ Convert HTML to an image, PDF or string. Browsershot controls Chrome directly ov
 
 ## Support us
 
-[<img src="https://spatie.be/github-ad-image/spatie-browsershot.jpg" alt="Support Spatie's open source work" width="419px" />](https://spatie.be/github-ad-click/spatie-browsershot)
+[<img src="https://spatie.be/github-ad-image/browsershot-rust.jpg" alt="Support Spatie's open source work" width="419px" />](https://spatie.be/github-ad-click/browsershot-rust)
 
 We invest a lot of resources into creating [best in class open source packages](https://spatie.be/open-source). You can support us by [buying one of our paid products](https://spatie.be/open-source/support-us).
 

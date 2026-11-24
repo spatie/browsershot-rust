@@ -18,3 +18,5 @@ Browsershot::url("https://example.com")
 ```
 
 This will add the header to the page you want to render, but those headers will not be added to any external resources that make up that page.
+
+When using `post`, use `set_extra_http_headers` instead. POST requests use their own headers.

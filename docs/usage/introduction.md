@@ -43,11 +43,15 @@ Output methods return a `Result`. Use `?` to propagate errors. Examples use hidd
 
 Builders consume and return themselves. Output methods borrow mutably, so you can save a screenshot and then read diagnostics from the same operation. The methods `triggered_requests`, `console_messages`, `failed_requests`, `redirect_history` and `page_errors` reuse the last operation's diagnostics when available. `output()` gives borrowed access to all of them without copying.
 
+The output also contains `result` and `exception`. Evaluation results keep their JSON types, HTML output is a string, and binary browser output is base64-encoded. An operation error remains available in `exception` alongside the captured diagnostics.
+
 ## Local file access
 
 HTML passed to `html()` or `set_html()` cannot load local files by default. Browsershot blocks `file:` requests in Chrome, including requests from images, stylesheets, scripts and iframes. This also blocks absolute filesystem paths such as `/var/www/app/public/logo.png`, which resolve to local files when rendering HTML without a content URL, and file URLs constructed by JavaScript.
 
 Blocked resources will not appear in the output. File URLs in HTML are blocked during rendering rather than rejected by `html()` with an exception.
+
+HTML containing `view-source` URLs or schemeless local network paths such as `//localhost/file` and `\\localhost\file` is rejected when rendering, even if local file access is enabled. Explicit HTTP(S) URLs are still allowed.
 
 If your trusted HTML intentionally loads local assets, you can explicitly allow local file access:
 

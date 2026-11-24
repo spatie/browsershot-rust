@@ -17,13 +17,15 @@ include = ["/src/", "/tests/*.rs", "/build.rs", "/docs/", "/README.md", "/LICENS
 [dependencies]
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
 tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 ureq = { version = "3", features = ["json"] }
 url = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+html-escape = "0.2"
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 command-fds = "0.3"

@@ -72,14 +72,14 @@ impl Drop for Connection {
 impl Connection {
     pub(crate) fn open(shot: &crate::Browsershot) -> Result<Self, Error> {
         let deadline = Instant::now() + shot.duration("timeout");
-        let remote = shot.options["browserWSEndpoint"]
+        let remote = shot.options["remoteInstanceUrl"]
             .as_str()
-            .map(str::to_owned)
-            .map(Ok)
+            .map(|url| remote_endpoint(url, deadline))
             .or_else(|| {
-                shot.options["remoteInstanceUrl"]
+                shot.options["browserWSEndpoint"]
                     .as_str()
-                    .map(|url| remote_endpoint(url, deadline))
+                    .map(str::to_owned)
+                    .map(Ok)
             });
         let mut connection = if let Some(endpoint) = remote {
             match endpoint.and_then(|endpoint| Self::websocket(&endpoint, deadline)) {
@@ -151,8 +151,14 @@ impl Connection {
         } else {
             tempfile::tempdir()?
         };
-        let profile_path = shot.options["userDataDir"]
-            .as_str()
+        let profile_argument = shot.options["args"].as_array().and_then(|arguments| {
+            arguments
+                .iter()
+                .rev()
+                .find_map(|argument| argument.as_str()?.strip_prefix("--user-data-dir="))
+        });
+        let profile_path = profile_argument
+            .or_else(|| shot.options["userDataDir"].as_str())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| profile.path().into());
         if !profile_path.is_absolute() {
@@ -172,11 +178,26 @@ impl Connection {
                 "--allow-file-access-from-files",
             ])
             .arg(format!("--user-data-dir={}", profile_path.display()))
-            .args(&shot.arguments)
-            .envs(&shot.environment)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(arguments) = shot.options["args"].as_array() {
+            for argument in arguments {
+                command.arg(argument.as_str().ok_or_else(|| {
+                    Error::InvalidInput("Chromium arguments must be strings".into())
+                })?);
+            }
+        }
+        if let Some(environment) = shot.options["env"].as_object() {
+            for (key, value) in environment {
+                command.env(
+                    key,
+                    value.as_str().ok_or_else(|| {
+                        Error::InvalidInput("environment values must be strings".into())
+                    })?,
+                );
+            }
+        }
         if shot.options["noSandbox"] == true {
             command.arg("--no-sandbox");
         }
@@ -482,6 +503,31 @@ impl Connection {
             "Page.frameNavigated" if params["frame"]["parentId"].is_null() => {
                 self.main_frame = params["frame"]["id"].as_str().map(str::to_owned)
             }
+            "Page.frameRequestedNavigation"
+                if params["frameId"].as_str() == self.main_frame.as_deref()
+                    && params["disposition"] == "currentTab" =>
+            {
+                self.loaded = false;
+                self.dom_loaded = false;
+            }
+            "Page.navigatedWithinDocument"
+                if params["frameId"].as_str() == self.main_frame.as_deref() =>
+            {
+                self.loaded = true;
+                self.dom_loaded = true;
+            }
+            "Page.frameStartedLoading"
+                if params["frameId"].as_str() == self.main_frame.as_deref() =>
+            {
+                self.loaded = false;
+                self.dom_loaded = false;
+            }
+            "Page.frameStoppedLoading"
+                if params["frameId"].as_str() == self.main_frame.as_deref() =>
+            {
+                self.loaded = true;
+                self.dom_loaded = true;
+            }
             "Page.loadEventFired" => self.loaded = true,
             "Page.domContentEventFired" => self.dom_loaded = true,
             "Page.javascriptDialogOpening" if self.options["dismissDialogs"] == true => {
@@ -492,7 +538,7 @@ impl Connection {
                 let url = params["request"]["url"].as_str().unwrap_or("").to_owned();
                 self.inflight.insert(id.clone());
                 self.requests.insert(id, url.clone());
-                if self.options["disableCaptureURLs"] != true {
+                if self.options["disableCaptureURLS"] != true {
                     self.result.requests.push(json!({"url":url}));
                 }
                 if !params["redirectResponse"].is_null() {
@@ -523,27 +569,65 @@ impl Connection {
                     .map(|args| {
                         args.iter()
                             .map(|arg| {
-                                arg["value"].as_str().map(str::to_owned).unwrap_or_else(|| {
-                                    if arg["value"].is_null() {
-                                        arg["description"]
+                                if !arg["objectId"].is_null() {
+                                    format!(
+                                        "JSHandle@{}",
+                                        arg["subtype"]
                                             .as_str()
-                                            .unwrap_or("undefined")
-                                            .to_owned()
-                                    } else {
-                                        arg["value"].to_string()
-                                    }
-                                })
+                                            .or(arg["type"].as_str())
+                                            .unwrap_or("object")
+                                    )
+                                } else if let Some(value) = arg.get("value") {
+                                    value
+                                        .as_str()
+                                        .map_or_else(|| value.to_string(), str::to_owned)
+                                } else {
+                                    arg["unserializableValue"]
+                                        .as_str()
+                                        .unwrap_or("undefined")
+                                        .trim_end_matches('n')
+                                        .to_owned()
+                                }
                             })
                             .collect::<Vec<_>>()
                             .join(" ")
                     })
                     .unwrap_or_default();
-                let frame = &params["stackTrace"]["callFrames"][0];
-                self.result.console_messages.push(json!({"type":params["type"],"message":text,"location":{"url":frame["url"],"lineNumber":frame["lineNumber"],"columnNumber":frame["columnNumber"]},"stackTrace":params["stackTrace"]["callFrames"]}));
+                let frames = params["stackTrace"]["callFrames"].as_array().map(|frames| frames.iter().map(|frame| json!({"url":frame["url"],"lineNumber":frame["lineNumber"],"columnNumber":frame["columnNumber"]})).collect::<Vec<_>>()).unwrap_or_default();
+                let location = frames.first().cloned().unwrap_or_else(|| json!({}));
+                let kind = if params["type"] == "warning" {
+                    "warn"
+                } else {
+                    params["type"].as_str().unwrap_or("log")
+                };
+                self.result.console_messages.push(
+                    json!({"type":kind,"message":text,"location":location,"stackTrace":frames}),
+                );
             }
             "Runtime.exceptionThrown" => {
                 let details = &params["exceptionDetails"];
-                self.result.page_errors.push(json!({"name":details["exception"]["className"].as_str().unwrap_or("Error"),"message":details["exception"]["description"].as_str().or(details["text"].as_str()).unwrap_or("unknown error")}));
+                let exception = &details["exception"];
+                let name = exception["className"].as_str().unwrap_or("Error");
+                let message = if let Some(value) = exception.get("value") {
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned)
+                } else {
+                    let description = exception["description"]
+                        .as_str()
+                        .or(details["text"].as_str())
+                        .unwrap_or("unknown error");
+                    description
+                        .strip_prefix(&format!("{name}: "))
+                        .unwrap_or(description)
+                        .split("\n    at ")
+                        .next()
+                        .unwrap_or(description)
+                        .to_owned()
+                };
+                self.result
+                    .page_errors
+                    .push(json!({"name":name,"message":message}));
             }
             "Fetch.authRequired" => {
                 let id = params["requestId"].as_str().unwrap_or("").to_owned();
@@ -561,7 +645,9 @@ impl Connection {
         let url = request["url"].as_str().unwrap_or("");
         let document = params["resourceType"] == "Document";
         let local = url.starts_with("file:");
-        let initial = self.initial_file.as_deref() == Some(url) && document;
+        let initial = self.initial_file.as_deref() == Some(url)
+            && document
+            && params["frameId"].as_str() == self.main_frame.as_deref();
         if initial {
             self.initial_file = None;
         }
@@ -583,6 +669,7 @@ impl Connection {
                         .is_some_and(|url| items.iter().any(|item| item.as_str() == url.host_str()))
                 })
             || (self.options["disableRedirects"] == true
+                && document
                 && !params["redirectedRequestId"].is_null());
         if blocked {
             self.send(
@@ -604,9 +691,8 @@ impl Connection {
             return Ok(());
         }
         let mut continuation = json!({"requestId":params["requestId"]});
-        if let Some(fields) = self.options["postParams"].as_object()
-            && document
-        {
+        if let Some(fields) = self.options["postParams"].as_object() {
+            headers = request["headers"].as_object().cloned().unwrap_or_default();
             let data = fields
                 .iter()
                 .map(|(key, value)| format!("{key}={}", value.as_str().unwrap_or("")))

@@ -1,4 +1,5 @@
 use crate::{Browsershot, Error, Source, cdp::Connection};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -21,10 +22,29 @@ fn validate(shot: &Browsershot) -> Result<(), Error> {
     if let Source::Url(url) = &shot.source {
         validate_url(url)?;
     }
+    if let Source::Html(html) = &shot.source {
+        let decoded = html_escape::decode_html_entities(html).to_ascii_lowercase();
+        let local_reference = regex::Regex::new(
+            r"(//|\\\\)\s*(localhost[/\\:\s]|127\.|0\.0\.0\.0[/\\:\s]|\[::1\][/\\:\s]|::1[/\\:\s])",
+        )
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+        // Explicit HTTP(S) URLs are permitted; only schemeless local references are rejected.
+        let local = local_reference.captures_iter(&decoded).any(|capture| {
+            let start = capture.get(0).map_or(0, |matched| matched.start());
+            &capture[1] != "//" || start == 0 || decoded.as_bytes()[start - 1] != b':'
+        });
+        if decoded.contains("view-source") || local {
+            return Err(Error::InvalidInput(
+                "HTML cannot contain view-source URLs or schemeless local network paths".into(),
+            ));
+        }
+    }
     if let Some(url) = shot.options["contentUrl"].as_str() {
         validate_url(url)?;
     }
     let known = [
+        "args",
+        "env",
         "viewport",
         "timeout",
         "protocolTimeout",
@@ -33,7 +53,7 @@ fn validate(shot: &Browsershot) -> Result<(), Error> {
         "dismissDialogs",
         "disableJavascript",
         "disableImages",
-        "disableCaptureURLs",
+        "disableCaptureURLS",
         "disableRedirects",
         "acceptInsecureCerts",
         "tagged",
@@ -57,6 +77,7 @@ fn validate(shot: &Browsershot) -> Result<(), Error> {
         "scale",
         "type",
         "quality",
+        "encoding",
         "clip",
         "selector",
         "selectorIndex",
@@ -67,6 +88,7 @@ fn validate(shot: &Browsershot) -> Result<(), Error> {
         "printBackground",
         "delay",
         "waitUntil",
+        "networkIdleTimeout",
         "function",
         "functionPolling",
         "functionTimeout",
@@ -97,6 +119,10 @@ fn validate(shot: &Browsershot) -> Result<(), Error> {
         "optimizeForSpeed",
         "blockLocalFileAccess",
         "newHeadless",
+        "outline",
+        "waitForFonts",
+        "path",
+        "pageFunction",
     ];
     if let Some(options) = shot.options.as_object() {
         for key in options.keys() {
@@ -140,7 +166,10 @@ fn render(
     if let Some(frame) = frame_tree["frameTree"]["frame"]["id"].as_str() {
         connection.main_frame(frame.to_owned());
     }
-    let mut viewport = options["viewport"].clone();
+    if let Some(agent) = options["userAgent"].as_str() {
+        connection.call("Network.setUserAgentOverride", json!({"userAgent":agent}))?;
+    }
+    let mut viewport = json!({"width":800,"height":600,"deviceScaleFactor":1,"isMobile":false});
     if let Some(device) = options["device"].as_str() {
         let devices: Value = serde_json::from_str(include_str!("devices.json"))?;
         let device = devices
@@ -152,14 +181,16 @@ fn render(
             json!({"userAgent":device["userAgent"]}),
         )?;
     }
+    if let Some(overrides) = options["viewport"].as_object() {
+        for (key, value) in overrides {
+            viewport[key] = value.clone();
+        }
+    }
     connection.call("Emulation.setDeviceMetricsOverride",json!({"width":viewport["width"],"height":viewport["height"],"deviceScaleFactor":viewport["deviceScaleFactor"].as_f64().unwrap_or(1.0),"mobile":viewport["isMobile"]==true,"screenOrientation":{"type":if viewport["isLandscape"]==true {"landscapePrimary"} else {"portraitPrimary"},"angle":if viewport["isLandscape"]==true {90} else {0}}}))?;
     connection.call(
         "Emulation.setTouchEmulationEnabled",
         json!({"enabled":viewport["hasTouch"]==true}),
     )?;
-    if let Some(agent) = options["userAgent"].as_str() {
-        connection.call("Network.setUserAgentOverride", json!({"userAgent":agent}))?;
-    }
     if options["acceptInsecureCerts"] == true {
         connection.call(
             "Security.setIgnoreCertificateErrors",
@@ -197,6 +228,11 @@ fn render(
     let mut temp_html = None;
     let url = match &shot.source {
         Source::Url(url) => url.trim().to_owned(),
+        Source::File(path) if options["contentUrl"].is_string() => {
+            let url = options["contentUrl"].as_str().unwrap_or("").to_owned();
+            connection.content(url.clone(), std::fs::read_to_string(path)?);
+            url
+        }
         Source::File(path) => url::Url::from_file_path(std::fs::canonicalize(path)?)
             .map_err(|()| Error::InvalidInput("invalid HTML file path".into()))?
             .to_string(),
@@ -223,6 +259,8 @@ fn render(
     };
     let html = matches!(shot.source, Source::Html(_));
     let intercept = html
+        || options["contentUrl"].is_string()
+        || options["blockLocalFileAccess"] == true
         || options["disableImages"] == true
         || options["disableRedirects"] == true
         || ["blockDomains", "blockUrls"].iter().any(|key| {
@@ -245,27 +283,40 @@ fn render(
     if let Some(error) = navigation["errorText"].as_str() {
         return Err(Error::Protocol(format!("navigation: {error}")));
     }
-    let wait = options["waitUntil"].as_str().unwrap_or("load");
+    let waits = match &options["waitUntil"] {
+        Value::Array(waits) => waits.clone(),
+        Value::String(wait) => vec![json!(wait)],
+        Value::Null => vec![json!("load")],
+        _ => {
+            return Err(Error::InvalidInput(
+                "waitUntil must be a lifecycle name or array".into(),
+            ));
+        }
+    };
+    let idle_timeout = Duration::from_millis(options["networkIdleTimeout"].as_u64().unwrap_or(500));
     let mut idle_since = None;
     loop {
-        let ready = match wait {
-            "domcontentloaded" => connection.dom_loaded,
-            "networkidle0" | "networkidle2" => {
-                if connection.inflight.len() > if wait == "networkidle0" { 0 } else { 2 } {
-                    idle_since = None;
-                } else {
-                    idle_since.get_or_insert_with(Instant::now);
+        let mut ready = true;
+        for wait in &waits {
+            ready &= match wait.as_str().unwrap_or("") {
+                "domcontentloaded" => connection.dom_loaded,
+                "networkidle" | "networkidle0" | "networkidle2" => {
+                    if connection.inflight.len() > if wait == "networkidle2" { 2 } else { 0 } {
+                        idle_since = None;
+                    } else {
+                        idle_since.get_or_insert_with(Instant::now);
+                    }
+                    connection.dom_loaded
+                        && idle_since.is_some_and(|start| start.elapsed() >= idle_timeout)
                 }
-                connection.dom_loaded
-                    && idle_since.is_some_and(|start| start.elapsed() >= Duration::from_millis(500))
-            }
-            "load" => connection.loaded,
-            other => {
-                return Err(Error::InvalidInput(format!(
-                    "unsupported waitUntil {other}"
-                )));
-            }
-        };
+                "load" => connection.loaded,
+                other => {
+                    return Err(Error::InvalidInput(format!(
+                        "unsupported waitUntil {other}"
+                    )));
+                }
+            };
+        }
         if ready {
             break;
         }
@@ -329,12 +380,28 @@ fn render(
         )?;
     }
     let output = match action {
-        Action::Evaluate(script) => evaluate(connection, script),
+        Action::Evaluate(script) => evaluate(
+            connection,
+            options["pageFunction"].as_str().unwrap_or(script),
+        ),
         Action::Diagnostics => Ok(Value::Null),
         Action::Screenshot => screenshot(connection, options),
         Action::Pdf => pdf(connection, options),
     };
     drop(temp_html);
+    if let Some(path) = options["path"].as_str()
+        && matches!(action, Action::Screenshot | Action::Pdf)
+        && let Ok(value) = &output
+    {
+        std::fs::write(
+            path,
+            STANDARD.decode(
+                value
+                    .as_str()
+                    .ok_or_else(|| Error::Protocol("missing binary output".into()))?,
+            )?,
+        )?;
+    }
     output
 }
 
@@ -392,9 +459,16 @@ fn wait_function(
     };
     let condition = expression(function);
     let script = format!(
-        "() => new Promise((resolve,reject)=>{{const timer=setTimeout(()=>{{observer?.disconnect();reject(new Error('waitForFunction timed out'));}},{timeout});let observer;const test=()=>{{try{{if({condition}){{clearTimeout(timer);observer?.disconnect();resolve(true);return true;}}}}catch(error){{clearTimeout(timer);observer?.disconnect();reject(error);return true;}}return false;}};if({polling}==='mutation'){{observer=new MutationObserver(test);observer.observe(document,{{childList:true,subtree:true,attributes:true,characterData:true}});test();}}else{{const tick=()=>{{if(!test()){{if({polling}==='raf')requestAnimationFrame(tick);else setTimeout(tick,{polling});}}}};tick();}}}})"
+        "() => new Promise((resolve,reject)=>{{const timer=setTimeout(()=>{{observer?.disconnect();reject(new Error('waitForFunction timed out'));}},{timeout});let observer;const test=async()=>{{try{{if(await ({condition})){{clearTimeout(timer);observer?.disconnect();resolve(true);return true;}}}}catch(error){{clearTimeout(timer);observer?.disconnect();reject(error);return true;}}return false;}};if({polling}==='mutation'){{observer=new MutationObserver(test);observer.observe(document,{{childList:true,subtree:true,attributes:true,characterData:true}});test();}}else{{const tick=async()=>{{if(!await test()){{if({polling}==='raf')requestAnimationFrame(tick);else setTimeout(tick,{polling});}}}};tick();}}}})"
     );
-    evaluate(connection, &script)?;
+    match evaluate(connection, &script) {
+        Err(Error::Protocol(message)) if message.contains("waitForFunction timed out") => {
+            return Err(Error::Timeout);
+        }
+        result => {
+            result?;
+        }
+    }
     Ok(())
 }
 
@@ -408,7 +482,7 @@ fn wait_selector(
     let visible = options["visible"] == true;
     let hidden = options["hidden"] == true;
     let condition = format!(
-        "() => {{ const e=document.querySelector({selector}); const visible=!!e && getComputedStyle(e).visibility!=='hidden' && getComputedStyle(e).display!=='none' && !!(e.getClientRects().length); return {} ; }}",
+        "() => {{ const e=document.querySelector({selector}); const r=e?.getBoundingClientRect(); const visible=!!e && getComputedStyle(e).visibility!=='hidden' && getComputedStyle(e).visibility!=='collapse' && r.width>0 && r.height>0; return {} ; }}",
         if hidden {
             "!visible"
         } else if visible {
@@ -443,11 +517,22 @@ fn interactions(connection: &mut Connection, options: &Value) -> Result<(), Erro
             }
             let text = entry["text"].as_str().unwrap_or("");
             let delay = entry["delay"].as_u64().unwrap_or(0);
-            if delay == 0 {
-                connection.call("Input.insertText", json!({"text":text}))?;
-            } else {
-                for character in text.chars() {
-                    connection.call("Input.insertText", json!({"text":character.to_string()}))?;
+            for character in text.chars() {
+                let text = character.to_string();
+                if character.is_ascii() {
+                    let key = if character == '\n' { "Enter" } else { &text };
+                    let code = match character {
+                        'a'..='z' | 'A'..='Z' => format!("Key{}", character.to_ascii_uppercase()),
+                        '0'..='9' => format!("Digit{character}"),
+                        '\n' => "Enter".into(),
+                        ' ' => "Space".into(),
+                        _ => String::new(),
+                    };
+                    connection.call("Input.dispatchKeyEvent", json!({"type":"keyDown","key":key,"code":code,"text":if character == '\n' { "\r" } else { &text },"unmodifiedText":text,"windowsVirtualKeyCode":character.to_ascii_uppercase() as u32}))?;
+                    connection.sleep(Duration::from_millis(delay))?;
+                    connection.call("Input.dispatchKeyEvent", json!({"type":"keyUp","key":key,"code":code,"windowsVirtualKeyCode":character.to_ascii_uppercase() as u32}))?;
+                } else {
+                    connection.call("Input.insertText", json!({"text":text}))?;
                     connection.sleep(Duration::from_millis(delay))?;
                 }
             }
@@ -479,6 +564,15 @@ fn interactions(connection: &mut Connection, options: &Value) -> Result<(), Erro
                         &json!({"visible":true}),
                         options["timeout"].as_u64().unwrap_or(60000),
                     )?;
+                    wait_function(
+                        connection,
+                        &format!(
+                            "async () => {{const e=document.querySelector({});if(!e || e.matches(':disabled'))return false;const a=e.getBoundingClientRect();await new Promise(requestAnimationFrame);const b=e.getBoundingClientRect();return a.x===b.x && a.y===b.y && a.width===b.width && a.height===b.height;}}",
+                            serde_json::to_string(selector)?
+                        ),
+                        &json!("raf"),
+                        options["timeout"].as_u64().unwrap_or(60000),
+                    )?;
                 }
                 let bounds = bounds(connection, selector, 0)?;
                 let x = bounds["x"].as_f64().unwrap_or(0.0)
@@ -498,6 +592,10 @@ fn interactions(connection: &mut Connection, options: &Value) -> Result<(), Erro
                             ))?;
                         }
                     }
+                }
+                connection.call("Page.getFrameTree", json!({}))?;
+                while !connection.loaded {
+                    connection.pump()?;
                 }
             }
         }
@@ -555,7 +653,9 @@ fn screenshot(connection: &mut Connection, options: &Value) -> Result<Value, Err
         params["clip"] = clip;
     } else if options["clip"].is_object() {
         params["clip"] = options["clip"].clone();
-        params["clip"]["scale"] = json!(1);
+        if params["clip"]["scale"].is_null() {
+            params["clip"]["scale"] = json!(1);
+        }
     } else if options["fullPage"] == true {
         let metrics = connection.call("Page.getLayoutMetrics", json!({}))?;
         params["clip"] = json!({"x":0,"y":0,"width":metrics["cssContentSize"]["width"],"height":metrics["cssContentSize"]["height"],"scale":1});
@@ -605,7 +705,11 @@ fn pdf(connection: &mut Connection, options: &Value) -> Result<Value, Error> {
             params[key] = options[key].clone();
         }
     }
-    params["generateTaggedPDF"] = json!(options["tagged"] == true);
+    params["generateTaggedPDF"] = json!(
+        options["tagged"] != false
+            || options["outline"] == true
+            || options["generateDocumentOutline"] == true
+    );
     if let Some(format) = options["format"].as_str() {
         let (width, height) = match format.to_ascii_lowercase().as_str() {
             "letter" => (8.5, 11.0),
@@ -650,6 +754,11 @@ fn pdf(connection: &mut Connection, options: &Value) -> Result<Value, Error> {
             json!({"color":{"r":0,"g":0,"b":0,"a":0}}),
         )?;
     }
-    evaluate(connection, "async () => { await document.fonts.ready; }")?;
+    if !options["outline"].is_null() {
+        params["generateDocumentOutline"] = options["outline"].clone();
+    }
+    if options["waitForFonts"] != false {
+        evaluate(connection, "async () => { await document.fonts.ready; }")?;
+    }
     Ok(connection.call("Page.printToPDF", params)?["data"].clone())
 }

@@ -33,6 +33,8 @@ impl Server {
                 };
                 let path = request.url().to_owned();
                 let response=match path.as_str() {
+                    path if path.starts_with("http://proxy-fixture.invalid/") && !request.headers().iter().any(|header|header.field.equiv("Proxy-Authorization") && header.value.as_str()=="Basic dXNlcjpwYXNz")=>tiny_http::Response::from_string("proxy authentication").with_status_code(407).with_header(tiny_http::Header::from_bytes("Proxy-Authenticate","Basic realm=\"proxy\"").unwrap()),
+                    path if path.starts_with("http://proxy-fixture.invalid/")=>tiny_http::Response::from_string("<h1>Authenticated proxy</h1>"),
                     "/redirect"=>tiny_http::Response::from_string("").with_status_code(302).with_header(tiny_http::Header::from_bytes("Location","/final").unwrap()),
                     "/final"=>tiny_http::Response::from_string("<h1>Final</h1>"),
                     "/missing"=>tiny_http::Response::from_string("missing").with_status_code(404),
@@ -130,6 +132,16 @@ fn screenshots_have_requested_pixels_crop_density_and_transparency() {
         ),
         (31, 17)
     );
+    let bytes = html(content)
+        .set_option(
+            "clip",
+            json!({"x":10,"y":15,"width":31,"height":17,"scale":2}),
+        )
+        .set_option("encoding", "base64")
+        .screenshot()
+        .unwrap();
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (62, 34));
 }
 
 #[test]
@@ -241,6 +253,16 @@ fn performs_form_interactions_and_waits_for_dynamic_content() {
     .evaluate("document.querySelector('#ready').textContent")
     .unwrap();
     assert_eq!(value, "Ready");
+    let server = Server::start();
+    let content = "<form action='/inspect' method='post'><input name='name'><select name='state'><option value='BE'>Belgium</option><option value='MT'>Montana</option></select><button>Submit</button></form>";
+    let output = html(content)
+        .set_content_url(&server.url)
+        .r#type("input", "Alice")
+        .select_option("select", "MT")
+        .click("button")
+        .body_html()
+        .unwrap();
+    assert!(output.contains("name=Alice&amp;state=MT"), "{output}");
 }
 
 #[test]
@@ -301,17 +323,23 @@ fn sends_post_cookies_and_headers_and_authenticates() {
     let server = Server::start();
     let value = server
         .shot("/inspect")
-        .post([("foo", "bar")])
+        .post([("z", "last"), ("a", "first")])
         .use_cookies([("session", "abc")], None)
         .set_extra_http_headers([("X-Every", "every")])
         .set_extra_navigation_http_headers([("X-Navigation", "nav")])
         .evaluate("JSON.parse(document.querySelector('pre').textContent)")
         .unwrap();
     assert_eq!(value["method"], "POST");
-    assert_eq!(value["body"], "foo=bar");
+    assert_eq!(value["body"], "z=last&a=first");
     assert_eq!(value["headers"]["cookie"], "session=abc");
     assert_eq!(value["headers"]["x-every"], "every");
-    assert_eq!(value["headers"]["x-navigation"], "nav");
+    assert!(value["headers"]["x-navigation"].is_null());
+    let headers = server
+        .shot("/inspect")
+        .set_extra_navigation_http_headers([("X-Navigation", "nav")])
+        .evaluate("JSON.parse(document.querySelector('pre').textContent).headers")
+        .unwrap();
+    assert_eq!(headers["x-navigation"], "nav");
     assert_eq!(
         server
             .shot("/auth")
@@ -329,7 +357,7 @@ fn reuses_a_persistent_profile_without_losing_browser_storage() {
     let path = profile.path().to_str().unwrap();
     server
         .shot("/")
-        .user_data_dir(path)
+        .add_chromium_arguments([format!("user-data-dir={path}")])
         .evaluate("localStorage.setItem('saved', 'profile-value')")
         .unwrap();
     assert_eq!(
@@ -421,6 +449,14 @@ fn renders_html_at_a_content_url_and_blocks_local_files_by_default() {
             .unwrap()
             .contains("Local")
     );
+    assert_eq!(
+        Browsershot::html_from_file_path(&page)
+            .no_sandbox()
+            .set_content_url(&server.url)
+            .evaluate("[document.querySelector('p').textContent,location.origin]")
+            .unwrap(),
+        json!(["Local", server.url])
+    );
 }
 
 #[test]
@@ -446,6 +482,145 @@ fn reports_invalid_input_missing_elements_and_deadlines() {
             .pdf(),
         Err(Error::RemoteConnection(_))
     ));
+}
+
+#[test]
+fn preserves_output_results_exceptions_and_php_option_names() {
+    let mut shot = html("<script>console.log('retained')</script>")
+        .set_option("disableCaptureURLS", true)
+        .set_option("args", json!(["--user-agent=Raw flag agent"]))
+        .set_option("env", json!({"BROWSERSHOT_TEST": "present"}))
+        .set_option("waitUntil", json!(["load", "networkidle0"]))
+        .set_option("networkIdleTimeout", 60);
+    assert_eq!(
+        shot.evaluate("[21 * 2,navigator.userAgent]").unwrap(),
+        json!([42, "Raw flag agent"])
+    );
+    let output = serde_json::to_value(shot.output().unwrap()).unwrap();
+    assert_eq!(output["result"], json!([42, "Raw flag agent"]));
+    assert!(output["exception"].is_null());
+    assert!(shot.triggered_requests().unwrap().is_empty());
+    assert!(
+        shot.evaluate("throw new Error('expected failure')")
+            .is_err()
+    );
+    let output = serde_json::to_value(shot.output().unwrap()).unwrap();
+    assert!(output["result"].is_null());
+    assert!(
+        output["exception"]
+            .as_str()
+            .unwrap()
+            .contains("expected failure")
+    );
+    assert_eq!(shot.console_messages().unwrap()[0]["message"], "retained");
+}
+
+#[test]
+fn combines_named_devices_with_explicit_viewport_overrides() {
+    let value = html("<meta name='viewport' content='width=device-width'>")
+        .user_agent("Overridden by the device")
+        .device("iPhone X")
+        .window_size(431, 719)
+        .device_scale_factor(2)
+        .set_option("viewport.hasTouch", false)
+        .evaluate("[innerWidth,innerHeight,devicePixelRatio,navigator.maxTouchPoints,navigator.userAgent.includes('iPhone')]")
+        .unwrap();
+    assert_eq!(value, json!([431, 719, 2, 0, true]));
+}
+
+#[test]
+fn typing_dispatches_keyboard_events_instead_of_only_inserting_text() {
+    let value = html("<input id='name'><script>window.keys=[];document.querySelector('input').addEventListener('keydown',e=>keys.push(e.key))</script>")
+        .r#type("#name", "Az!")
+        .evaluate("[document.querySelector('input').value,window.keys]")
+        .unwrap();
+    assert_eq!(value, json!(["Az!", ["A", "z", "!"]]));
+}
+
+#[test]
+fn validates_html_like_php_without_blocking_explicit_http_resources() {
+    for content in [
+        "<iframe src='view-source:https://example.com'>",
+        "<iframe src='&#118;iew-source:https://example.com'>",
+        "<iframe src='//localhost/file'>",
+        "<iframe src='//127.1.2.3/file'>",
+        "<iframe src='&#47;&#47;[::1]/file'>",
+        r"<iframe src='\\localhost/file'>",
+        r"<iframe src='\\0.0.0.0/file'>",
+        r"<iframe src='\\localhost\file'>",
+        r"<iframe src='\\[::1]\file'>",
+    ] {
+        assert!(
+            matches!(
+                html(content).allow_local_file_access(true).body_html(),
+                Err(Error::InvalidInput(_))
+            ),
+            "{content}"
+        );
+    }
+    let server = Server::start();
+    let content = format!(
+        "<script src='{}/asset.js'></script><style>.hover\\:flex{{display:flex}}</style>",
+        server.url
+    );
+    assert_eq!(html(&content).evaluate("window.assetLoaded").unwrap(), true);
+}
+
+#[test]
+fn reports_console_values_page_exceptions_and_output_write_failures() {
+    let mut shot = html("<script>console.warn(null,undefined,{a:1},[2]);throw null;</script>");
+    shot.body_html().unwrap();
+    let messages = shot.console_messages().unwrap();
+    assert_eq!(messages[0]["type"], "warn");
+    assert_eq!(
+        messages[0]["message"],
+        "null undefined JSHandle@object JSHandle@array"
+    );
+    assert!(messages[0]["stackTrace"].as_array().unwrap()[0]["url"].is_string());
+    assert_eq!(shot.page_errors().unwrap()[0]["message"], "null");
+    let directory = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        shot.save(directory.path().join("missing/output.png")),
+        Err(Error::Io(_))
+    ));
+    assert!(shot.output().unwrap().exception.is_some());
+}
+
+#[test]
+fn uses_authenticated_proxies_and_generates_pdf_outlines() {
+    let proxy = Server::start();
+    assert_eq!(
+        Browsershot::url("http://proxy-fixture.invalid/")
+            .no_sandbox()
+            .timeout(15)
+            .set_proxy_server(&proxy.url)
+            .authenticate("user", "pass")
+            .evaluate("document.querySelector('h1').textContent")
+            .unwrap(),
+        "Authenticated proxy"
+    );
+    let bytes = html("<h1>Outline heading</h1><p>Content</p>")
+        .set_option("outline", true)
+        .set_option("waitForFonts", false)
+        .pdf()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("/Outlines"));
+    let bytes = html("<style>body{background:#c03420}</style>")
+        .set_screenshot_type("jpeg", Some(93))
+        .manipulate(|image| image.to_rgba8().into())
+        .screenshot()
+        .unwrap();
+    assert!(bytes.starts_with(&[0xff, 0xd8]));
+}
+
+#[test]
+fn waits_for_async_functions_visible_boxes_and_enabled_locators() {
+    let result = html("<div id='empty' style='width:0;height:0'></div><button disabled onclick='window.clicked=true'>Click</button><script>setTimeout(()=>document.querySelector('button').disabled=false,200)</script>")
+        .locator_click("button")
+        .wait_for_function("async () => { await new Promise(r=>setTimeout(r,50)); return window.clicked===true; }",Polling::RequestAnimationFrame,Duration::from_secs(2))
+        .wait_for_selector_with_options("#empty",WaitForSelectorOptions{hidden:true,timeout:Some(Duration::from_millis(200)),..Default::default()})
+        .evaluate("window.clicked").unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
@@ -479,6 +654,16 @@ fn distinguishes_strict_network_idle_from_two_connection_idle() {
             .evaluate("42"),
         Err(Error::Timeout)
     ));
+    assert_eq!(
+        html(content)
+            .set_content_url(&server.url)
+            .wait_until_network_idle(true)
+            .set_option("networkIdleTimeout", 30)
+            .timeout(5)
+            .evaluate("42")
+            .unwrap(),
+        42
+    );
 }
 
 #[test]

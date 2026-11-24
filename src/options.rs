@@ -82,12 +82,13 @@ flags! {
     dismiss_dialogs, "dismissDialogs", "Automatically dismiss JavaScript dialogs.";
     disable_javascript, "disableJavascript", "Disable JavaScript execution in the page.";
     disable_images, "disableImages", "Block image requests and remove image elements.";
-    disable_capture_urls, "disableCaptureURLs", "Stop collecting requested URLs to reduce memory usage.";
+    disable_capture_urls, "disableCaptureURLS", "Stop collecting requested URLs to reduce memory usage.";
     disable_redirects, "disableRedirects", "Block HTTP redirects.";
     ignore_https_errors, "acceptInsecureCerts", "Accept invalid HTTPS certificates.";
     tagged_pdf, "tagged", "Generate an accessible tagged PDF.";
     transparent_background, "omitBackground", "Use a transparent PDF or screenshot background.";
     use_pipe, "pipe", "Use a local DevTools pipe instead of WebSocket.";
+    new_headless, "newHeadless", "Use Chrome's modern headless mode, which is the default.";
 }
 
 macro_rules! strings {
@@ -297,14 +298,17 @@ impl Browsershot {
         self,
         params: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
+        let params = params
+            .into_iter()
+            .map(|(key, value)| (key.into(), Value::String(value.into())))
+            .collect::<serde_json::Map<String, Value>>();
         self.set_option(
             "postParams",
-            json!(
-                params
-                    .into_iter()
-                    .map(|(key, value)| (key.into(), value.into()))
-                    .collect::<std::collections::BTreeMap<String, String>>()
-            ),
+            if params.is_empty() {
+                Value::Null
+            } else {
+                Value::Object(params)
+            },
         )
     }
     /// Set cookies, using the URL host unless a domain is supplied.
@@ -415,7 +419,7 @@ impl Browsershot {
         self.set_option("initialPageNumber", number.saturating_sub(1))
             .pages(format!("{number}-"))
     }
-    fn push_option(&mut self, key: &str, value: Value) {
+    pub(super) fn push_option(&mut self, key: &str, value: Value) {
         if !self.options[key].is_array() {
             self.options[key] = json!([]);
         }

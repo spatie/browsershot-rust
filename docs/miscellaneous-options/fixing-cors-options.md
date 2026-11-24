@@ -12,7 +12,7 @@ If you experience issues related to [cors](https://developer.mozilla.org/en-US/d
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 # let path_to_image = "example.png";
 Browsershot::url("https://example.com")
-   .add_chromium_arguments(["disable-web-security"])
+   .set_option("args", json!(["--disable-web-security"]))
    .save(path_to_image)?;
 # Ok(())
 # }
