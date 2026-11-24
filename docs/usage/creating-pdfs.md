@@ -58,7 +58,7 @@ let base64_data = Browsershot::url("https://example.com")
 
 It is the responsibility of the user to validate the URLs and HTML passed to browsershot. Only pass URLs and HTML that you trust.
 
-Local file requests from `html()` are blocked by default. If your trusted HTML needs local assets, explicitly opt in with `allow_local_file_access(true)`. See [local file access](/docs/browsershot-rust/v1/usage/introduction#local-file-access) for details and security considerations.
+Local file requests from `html()` are blocked by default. If your trusted HTML needs local assets, explicitly opt in with `allow_local_file_access(true)`. See [local file access](/docs/browsershot-rust/v1/usage/introduction#content-local-file-access) for details and security considerations.
 
 ## Sizing the pdf
 
